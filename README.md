@@ -1,1 +1,2 @@
-# lesbirel_et_al_methylation_export
+# The m6A-methylase complex recruits TREX and regulates mRNA export.
+## Supplementary Code
