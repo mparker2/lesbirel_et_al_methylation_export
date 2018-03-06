@@ -1,0 +1,135 @@
+---
+title: "WTAP/Viriliser RNAseq Analysis"
+author: "Matthew Parker"
+date: "19 June 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## WTAP/Viriliser RNAseq Analysis
+
+```{r}
+library(tximport)
+library(edgeR)
+library(biomaRt)
+
+ensembl = useMart(biomart="ENSEMBL_MART_ENSEMBL", 
+                  host="grch37.ensembl.org",
+                  path="/biomart/martservice",
+                  dataset="hsapiens_gene_ensembl")
+annot <- getBM(attributes=c('ensembl_transcript_id',
+                            'ensembl_gene_id',
+                            'hgnc_symbol',
+                            'description'),
+               mart=ensembl)
+tx2gene <- annot[,1:2]
+write.table(tx2gene, '~/Documents/analysis_notebooks/m6a/wtap_viril/zenodo/output/transcript2gene.tsv', sep='\t', quote=FALSE)
+annot <- annot[!duplicated(annot$ensembl_gene_id),]
+annot <- annot[,c(2:4)]
+```
+
+```{r}
+fn = Sys.glob('~/Documents/analysis_notebooks/m6a/wtap_viril/zenodo/salmon_counts/*hg19_incl_ncrna_salmon_output/quant.sf')
+print("## File names:")
+print(paste(fn, sep="\n"))
+sample.names = unlist(strsplit(basename(dirname(fn)), '_', 2))[((1:12)*8 - 7)]
+print("## Sample names:")
+print(paste(sample.names, sep='\n'))
+names(fn) = sample.names
+salmon.gene = tximport(fn, type='salmon', tx2gene=tx2gene, dropInfReps=TRUE)
+counts = salmon.gene$counts
+len = salmon.gene$length
+```
+
+##Preparing data for edgeR
+
+taken from tximport instructions for converting salmon counts to edgeR compatible format
+
+```{r}
+normMat <- len/exp(rowMeans(log(len)))
+o <- log(calcNormFactors(counts/normMat)) + log(colSums(counts/normMat))
+y <- DGEList(counts)
+y$offset <- t(t(log(normMat)) + o)
+keep <- rowSums(cpm(y) > 1) >= 2
+y <- y[keep, , keep.lib.sizes=FALSE]
+plotMDS(y, method='bcv', top=200)
+# y is now ready for estimate dispersion functions see edgeR User's Guide
+```
+
+Build design matrix:
+
+```{r}
+groups <- factor(substr(sample.names, 1, nchar(sample.names) - 1))
+design <- model.matrix(~0 + groups)
+rownames(design) <- sample.names
+colnames(design) <- levels(groups)
+design
+```
+
+estimate dispersions with edgeR using design matrix, and fit model
+
+```{r}
+y <- estimateDisp(y, design=design)
+fit <- glmFit(y, design)
+```
+
+Check KD v control to see if WTAP and viriliser are knocked down
+
+```{r}
+kd_vs_cntrl_cyto <- glmLRT(fit, contrast=makeContrasts('VWC - CC', levels=design))
+plotMD(kd_vs_cntrl_cyto)
+
+topTagsAnnot <- function(fitObj) {
+  res <- merge(topTags(fitObj, n=Inf),
+               annot,
+               by.x=0,
+               by.y='ensembl_gene_id',
+               all.x=TRUE,
+               all.y=FALSE)
+  rownames(res) <- res$Row.names
+  res <- res[,c(7,2:6,8)]
+  res <- res[order(-abs(res$logFC)),]
+  return (res)
+}
+
+kd_vs_cntrl_cyto.res <- topTagsAnnot(kd_vs_cntrl_cyto)
+# KIAA1429 aka Virilizer
+kd_vs_cntrl_cyto.res['ENSG00000164944',]
+```
+
+```{r}
+# WTAP
+kd_vs_cntrl_cyto.res['ENSG00000146457',]
+```
+
+Now we can look at differences between the nuclear cyto ratio in VW v Cntrl
+
+```{r}
+kd_vs_cntrl_nc_ratio <- glmLRT(fit,
+                               contrast=makeContrasts('(VWN - VWC) - (CN - CC)',
+                                                      levels=design))
+kd_vs_cntrl_nc_ratio.res <- topTagsAnnot(kd_vs_cntrl_nc_ratio)
+kd_vs_cntrl_nc_ratio.res <- kd_vs_cntrl_nc_ratio.res[kd_vs_cntrl_nc_ratio.res$logCPM > 2,]
+head(kd_vs_cntrl_nc_ratio.res, n=20)
+```
+
+
+
+
+```{r}
+plotMD(kd_vs_cntrl_nc_ratio)
+```
+
+```{r}
+nc <- as.data.frame(cpm(y, normalized.lib.sizes = TRUE, log=TRUE))
+all_res <- merge(kd_vs_cntrl_nc_ratio.res, nc, by=0, all.x=TRUE, all.y = FALSE)
+rownames(all_res) <- all_res$gene_id
+all_res <- all_res[,3:ncol(all_res)-1]
+write.table(all_res, 
+            file='~/Documents/analysis_notebooks/m6a/wtap_viril/zenodo/output/nuclear_accumulation_results.tsv',
+            sep='\t',
+            quote=FALSE)
+```
