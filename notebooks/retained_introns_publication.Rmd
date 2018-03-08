@@ -1,0 +1,279 @@
+---
+title: "Investigating Retained introns"
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    code_folding: hide
+---
+
+Run this notebook in the directory that contains the database from pipeline_retained_introns.
+
+The WTAP virizlizer knockdowns were run through pipeline_retained_introns. This basiscally runs at DEXseq analysis on transcript chunks, and then limits to result reporting to only introns to maximize statisitcal power. It also divides introns into:
+
+1) Sequence that overlaps with at least one intron in at least one transcript. Note that this may be exonic sequence for some transcripts
+   (we call these **intron chunks**)
+2) Sequence that overlaps an intron that represents an annotated retained intron: that is where there are two transcripts whose intron 
+   structure differs only in that one transcript has an intron entirely contained within an exon in the other transcript( we call these
+   **annotated retained introns**.
+3) Sequence that overalps with at least one intron in at least one transcript and never overlaps with an exon. We call these **constituative introns**
+
+
+We will define a retained intron as an intron whose level increases in the knockdown to at twice that seen in the control after subtracting the difference in expression of the whole gene.
+
+First having a look at the overall differences:
+
+```{r}
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+library(RSQLite)
+library(dplyr)
+library(ggplot2)
+retained.db <- dbConnect(SQLite(), "retained_introns.db")
+retained_dex <- dbGetQuery(retained.db, "SELECT track,
+                                                groupID as gene_id,
+                                                featureID as exon_id,
+                                                exonBaseMean,
+                                                genomicData_width,
+                                                genomicData_start,
+                                                genomicData_end,
+                                                genomicData_seqnames,
+                                                pvalue,
+                                                padj,
+                                                log2fold_knockdown_Control as log2fold
+                                         
+                                         FROM  dexseq_results ")
+exons = dbGetQuery(retained.db, "SELECT * FROM filtered_chunks_exons")
+retained_introns = dbGetQuery(retained.db, "SELECT gene_id, exon_id, exon as retained FROM filtered_chunks_retained_introns")
+retained_dex <- merge(retained_dex, exons)
+retained_dex <- merge(retained_dex, retained_introns)
+direction_summary <- retained_dex %>% 
+  na.omit() %>%
+  mutate(sig=padj<0.1 & abs(log2fold) > 1) %>% 
+  mutate(Direction=ifelse(sig, ifelse(log2fold >0, "Up", "Down"), "Not Significant")) %>%
+  group_by(Direction) %>%
+  summarise(count = n_distinct(gene_id))
+
+direction_summary
+
+```
+
+So there are `r direction_summary$n[direction_summary$Direction=="Up"]` genes with introns that are differentiall retained upon knockdown of WTAP and virilizer. 
+
+
+```{r}
+intron_class_summary <- retained_dex %>%
+  na.omit() %>%
+  filter(track=="Nuclear-knockdown") %>%
+  mutate(significant_change=padj<0.1 & abs(log2fold) > 1) %>%
+  mutate(constituative_intron = exon == 0, annotated_retained = retained==1 ) %>%
+  mutate(direction = ifelse(significant_change, ifelse(log2fold >0, 1, -1), 0)) %>%
+  group_by(constituative_intron, annotated_retained, direction) %>% 
+  summarize(count=n_distinct(gene_id))
+
+intron_class_summary
+```
+
+```{r}
+retained_dex %>%
+  na.omit() %>%
+  filter(track=="Nuclear-knockdown") %>%
+  filter(padj<0.1 & log2fold > 1) %>%
+  mutate(constituative_intron = exon == 0, annotated_retained = retained==1) %>%
+  select(gene_id, constituative_intron, annotated_retained) %>%
+  write.table("retained_introns.tsv", sep="\t", row.names=FALSE, quote=FALSE)
+
+```
+
+We can visualise this as in the plot below.
+
+```{r, fig.width=2, fig.height=2}
+intron_class_summary %>%
+  group_by(constituative_intron, annotated_retained) %>%
+  mutate(percent=direction*count/sum(count)) %>%
+  filter(direction != 0) %>%
+  ggplot() + 
+  aes(paste0(constituative_intron, annotated_retained),
+      percent,
+      fill=factor(direction)) +
+  geom_bar(stat="identity", position="identity") +
+  theme_minimal(base_size = 8) +
+  coord_flip() +
+  scale_x_discrete(labels=c("Alternative\nintrons",
+                            "Annotated\nretained introns",
+                            "Retained\nconstituative\nintrons")
+                  ) +
+  xlab(NULL) +
+  scale_y_continuous(labels=function(x) scales::percent(abs(x)), limits=c(-0.06,0.06),
+                      name="Percentage of genes") +
+  scale_fill_manual(values=cbbPalette[c(2,6)],
+                    labels=c("Decreased\nretension","Increased\nretension"),
+                    name=NULL,
+                    position="bottom") +
+  theme(legend.position="bottom", 
+        axis.text.x=element_text(size=8),
+        axis.text.y=element_text(size=8),
+        axis.title = element_text(size=9),
+        legend.text = element_text(size=8),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(-2,-2,-2,-2)) +
+  geom_hline(yintercept=0, lwd=0.5, col="grey20") -> g
+
+ggsave( "numbers_of_retained_genes.pdf",g, width=2, height=2, units="in", dpi=300)
+print(g)
+```
+
+So the big difference is not in things that are optionally intronic, whether they be annotated as retained introns or not, the real difference is an increase in retention of sequence that is never annotated as part of any transcript. This may well of course be due to difference in intron length, with consituative introns likely to be longer than optional intronic sections. 
+
+Do the different classes have different lengths?
+```{r}
+retained_dex %>%
+  na.omit() %>%
+  ggplot() +
+  aes(paste0(exon==0, retained==1),
+      genomicData_width/1000) +
+  geom_violin() +
+  scale_y_log10() + 
+  theme_bw() + 
+  ylab("Length of intron (kp)") +
+  scale_x_discrete(labels=c("Alternative", "annotated", "constituative"),
+                   name="")
+```
+
+So yes, constiuative introns are longer than the others. Does this have an effect on liklihood of differential retension?
+
+```{r}
+retained_dex %>%
+  na.omit() %>%
+  filter(track=="Nuclear-knockdown") %>%
+  ggplot() +
+  aes(col=paste0(exon==0, retained==1),
+      group=paste0(exon==0, retained==1),
+      x=genomicData_width/1000,
+      y=as.numeric(padj<0.1 & log2fold>1)) +
+  stat_smooth() +
+  scale_x_log10() + 
+  theme_bw() + 
+  scale_y_continuous(name="p(differential)") +
+  scale_color_manual(labels=c("Alternative", "annotated", "constituative"),
+                       name="class", values=cbbPalette) +
+  xlab("Intron Length (kb)")
+```
+
+This shows that the excess of constituative introns called as differential is probably entirely due to them
+being longer. For lengths where we find all three types of intron, alternate introns look similar to constituative
+ones and annotated ones have a higher rate of signficant differential introns. 
+
+It also shows that we are underpowered, as the power to detect never levels off with increasing length.
+
+## Effect of retension on cytoplasmic expression.
+
+Intron retention often causes nonsense mediated decay. This would lead to a reduction of cytoplasmic expression. Do we see evidence of this?
+
+```{r, fig.width=3, fig.height=3}
+library(VennDiagram)
+res.vwc.v.cc <- read.delim("/shared/sudlab1/General/projects/RNA_export/methylation_results/wtap_viril/notebooks/cytoplasmic_results.tsv")
+res.vwc.v.cc$gene_id <- rownames(res.vwc.v.cc)
+down_reg <- res.vwc.v.cc %>%
+  subset(logFC < -0.5 & FDR < 0.1) %>%
+  row.names()
+sig_retained <- unique(subset(na.omit(retained_dex), track == "Nuclear-knockdown" & padj < 0.1 & log2fold > 1)$gene_id)
+common_background <- intersect(subset(na.omit(retained_dex), track=="Nuclear-knockdown")$gene_id, 
+                               row.names(na.omit(res.vwc.v.cc)))
+fisher.test(x=unique(common_background) %in% down_reg, y=unique(common_background) %in% sig_retained)
+venn <- venn.diagram(list("Retained\nIntron"=sig_retained,
+                          "Down\nregulated"=down_reg),
+                       #   "DaPars"=dapars_genes,
+                         
+             filename=NULL, lty=rep("blank", 2), fill=cbbPalette[c(6,2)], alpha=c(0.9,0.7),
+             
+             cat.pos=c(0,180), cat.dist=c(0.05,0.05))
+grid.newpage()
+grid.draw(venn)
+```
+
+So that doesn't look like much of a relationship to me, which is a bit puzzling (worrying?). Well, not, I suppose if we want to argue that accumulation is not due to retension. I suspect this is probably due to the retension effects being small, so the down-regulation would be small, and possibly not caught. 
+
+## Overlap with nuclear accumulated genes
+We would like to see if our nuclear accumulated genes are in fact an artifact of nonsense mediated decay in the cytoplasm. Do to do this, lets overlap the nuclear accumlated genes with the genes that have a retained intron of any sort. 
+
+```{r}
+nucacc_meth <- read.delim("/shared/sudlab1/General/projects/RNA_export/methylation_results/wtap_viril/gene_lists/NA_all_methylated_difference.txt",
+                        header=FALSE, 
+                        stringsAsFactors = FALSE)$V1
+nucacc_nometh <- read.delim("/shared/sudlab1/General/projects/RNA_export/methylation_results/wtap_viril/gene_lists/NA_all_methylated_intersection.txt",
+                            header=FALSE, 
+                            stringsAsFactors = FALSE)$V1
+
+nucacc <- c(nucacc_meth, nucacc_nometh)
+
+#nucacc <- data.frame(gene_id = nucacc, methylated = nucacc %in% nucacc_meth)
+#count(nucacc, methylated)
+```
+
+Find significant retained introns in the nucleus and overlap them with the nuclear accumated genes as a venn diagram
+
+```{r, fig.width=1.5, fig.height=1.5}
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+sig_retained <- unique(subset(na.omit(retained_dex), track == "Nuclear-knockdown" & padj < 0.1 & log2fold > 1)$gene_id)
+nintersect = length(intersect(nucacc, sig_retained))
+nnucacc= length(nucacc)
+nretained =  length(sig_retained)
+ngenes =  length(unique(subset(na.omit(retained_dex), track=="Nuclear-knockdown")$gene_id))
+enrichment = (nintersect/nnucacc)/(nretained/ngenes)
+with(subset(na.omit(retained_dex), track=="Nuclear-knockdown"), fisher.test(x=unique(gene_id) %in% nucacc, y=unique(gene_id) %in% sig_retained))
+library(VennDiagram)
+library(RColorBrewer)
+venn <- venn.diagram(list("Retained\nIntron"=sig_retained,
+                          "Nuclear\nAccumulated"=nucacc),
+                       #   "DaPars"=dapars_genes,
+                         
+             filename=NULL, lty=rep("blank", 2), fill=cbbPalette[c(6,2)], alpha=c(0.9,0.7),
+             
+             cat.pos=c(0,180), cat.dist=c(0.05,0.05), fontfamily="sans",
+             cex=0.75)
+grid.newpage()
+ggsave("RI_NA_venn.pdf", venn,height=1.5, width=1.5, units="in")
+grid.draw(venn)
+```
+
+This is a `r enrichment` enrichment of retained intron genes amounst the nuclear accumulated genes. 
+It looks like there are two populations, one with an exon that does change and one with an exon that doesn't, with the break between populations being at a log2fold change of 5.
+
+## Overlap with methylated genes
+
+```{r, fig.width=1.5, fig.height=1.5}
+CITS_overlaps <- read.delim("miCLIP_exon_overlaps/m6a_CITS_gene_overlap.bed", header=F, stringsAsFactors = F)$V4
+CIMS_overlaps <- read.delim("miCLIP_exon_overlaps/m6a_CIMS_gene_overlap.bed", header=F, stringsAsFactors = F)$V4
+
+meth_overlaps <- c(CITS_overlaps,CIMS_overlaps)
+meth_overlaps <- sapply(meth_overlaps, function(x) strsplit(x, "_")[[1]][1])
+meth_overlaps <- as.data.frame(table(meth_overlaps))
+names(meth_overlaps) <- c("gene_id", "freq")
+with(subset(na.omit(retained_dex), track=="Nuclear-knockdown"), fisher.test(x=unique(gene_id) %in% meth_overlaps$gene_id, y=unique(gene_id) %in% sig_retained))
+library(VennDiagram)
+library(RColorBrewer)
+venn <- venn.diagram(list("Retained\nIntron"=sig_retained,
+                          "Methylated"=intersect(meth_overlaps$gene_id, na.omit(retained_dex)$gene_id)),
+                       #   "DaPars"=dapars_genes,
+                       #    "Accumulated"=nucacc),
+             filename=NULL, lty=rep("blank", 2), fill=cbbPalette[c(6,2)], alpha=c(0.9,0.7),
+             
+             cat.pos=c(0,180), cat.dist=c(0.05,0.05), fontfmaily="sans",
+             cex=0.75)
+grid.newpage()
+ggsave("RI_meth_venn.pdf", venn,height=1.5, width=1.5, units="in")
+grid.draw(venn)
+
+```
+
+This on an enrichment (relative risk) basis, this is a similar level of association as between intron retension and nuclear accumulation. On an odds ration is stronger. Either way the p value is very significant.
+
+# Conclusions
+
+* We have found some retained introns
+* They tend to be in sequence not previously annotated as retained
+* This is proably because these tend to be longer introns and we are underpowered for finding the full set of retained introns
+* Intron retension has a very weak association with reduction in cytoplasmic abundance
+* The overlap with nuclear retained genes is signficant, but small when we restrict ourseleves to significantly retained introns
+* There is evidence a large number of introns with large but noisey increases in retension that are not significant on the DEXSeq test. These do seem to have an association with the nuclear retained genes. 
+

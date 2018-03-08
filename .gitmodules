@@ -1,0 +1,4 @@
+[submodule "retained_intron_pipeline"]
+	path = retained_intron_pipeline
+	url = git@github.com:sudlab/pipeline_retained_introns.git
+	branch = lesbirel_et_al_pub
