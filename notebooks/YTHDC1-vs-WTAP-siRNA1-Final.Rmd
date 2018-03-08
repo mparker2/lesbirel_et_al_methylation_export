@@ -1,0 +1,128 @@
+---
+title: "Comparison of the effect of YTHCD1 knockdown and the effect of WTAP knockdown on nuclear:cyto ratio"
+output: html_notebook
+---
+
+Data was downloaded from GEO as GSE74397. Data appears to have come from unreplicated RNA-seq that has been processed with Cuffdiff. THe downloaded table contains FPKMs in Cyto, Nuclear and Total for HeLa cells transfected with siControl, siYT521 (not of interest here) and siYTHDC1. Quantification has been done over refseq transcripts.
+
+```{r}
+library(org.Hs.eg.db)
+library(RSQLite)
+library(ggplot2)
+library(edgeR)
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+```
+
+Importing the dataset
+```{r}
+ythdc1_fpkm_matrix = read.delim("GSE74397_Subcellular_RNA_Seq_genes.fpkm.txt", stringsAsFactors = FALSE)
+req2ens <- select(org.Hs.eg.db, keys=ythdc1_fpkm_matrix$tracking_id, keytype="REFSEQ", columns="ENSEMBL")
+ythdc1_fpkm_matrix = merge(ythdc1_fpkm_matrix, req2ens, by.x="tracking_id", by.y="REFSEQ")
+```
+
+
+Importing WTAP target genes and binding the vectors together
+```{R}
+targetgenes1 <- read.table("/shared/sudlab1/General/projects/RNA_export/methylation_results/wtap_viril/gene_lists/NA_all_methylated_difference.txt")
+targetgenes2 <- read.table("/shared/sudlab1/General/projects/RNA_export/methylation_results/wtap_viril/gene_lists/NA_all_methylated_intersection.txt")
+WTAPtargetgenes <- c(as.vector(targetgenes1$V1),as.vector(targetgenes2$V1))
+```
+
+
+
+Here we compare the cumulative frequencies for log2 siYTHDC1/Control nuclear fpkms of WTAP targets and non-targets
+Here we normalise to the controls by each gene fpkm by its relative control, take the mean of the two replicates and then Log2 the results.
+
+```{R}
+testmatrix2 <- ythdc1_fpkm_matrix
+testmatrix2$log2ythdc1oversiCnuc <- log2(((testmatrix2$siYTHDC1.Nucleus/testmatrix2$siControl.Nucleus.re)+(testmatrix2$siYT521.Nucleus/testmatrix2$siControl.Nucleus))/2)
+testmatrix2clean <- testmatrix2[-which(testmatrix2$log2ythdc1oversiCnuc %in% c("NaN","Inf","-Inf")),]
+```
+
+Now we sort the genes into targets of WTAP and non targets
+```{R}
+testmatrix2clean$WTAPtargetstatus <- rep("Non-Target",length(testmatrix2clean$ENSEMBL))
+testmatrix2clean$WTAPtargetstatus[which(testmatrix2clean$ENSEMBL %in% WTAPtargetgenes)] <- "Target"
+```
+
+Here we use a Mann-Whitney U test to determine whether there is a signifant difference between the nuclear fpkms for the targets and non-targets. The result is significant.
+```{R}
+nuclearwilcoxtest <- wilcox.test(log2ythdc1oversiCnuc ~ WTAPtargetstatus, data = testmatrix2clean)
+wilcox.test(log2ythdc1oversiCnuc ~ WTAPtargetstatus, data = testmatrix2clean)
+```
+Here we make a cumulative frequency plot for the log2 nuclear fpkms with different traces for WTAP-targets and non-targets
+
+```{R, fig.width=3, fig.height=3, units="in"}
+nucgg <- ggplot(testmatrix2clean, aes(log2ythdc1oversiCnuc)) + stat_ecdf(geom = "step") + 
+aes(colour=factor(testmatrix2clean$WTAPtargetstatus)) +  
+coord_cartesian(xlim = c(-1,1),
+                ylim = c(0,1)) +
+labs(x=expression(paste("Log" ["2"],"(siYTHDC1/siControl)")),
+y="Cumulative Fraction") + 
+theme_bw(base_size=10) + 
+ggtitle("Nuclear") +
+theme(panel.background = element_blank(), 
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      aspect.ratio = 1,
+      legend.position = "bottom",
+      plot.title = element_text(size = 10,colour="black",margin = margin(t=20,b=-20),hjust = 0.15),
+      panel.border = element_rect(colour = "black", fill=NA, size=1.5)) + 
+scale_colour_manual(values=cbbPalette[c(6,2)],
+                    name="     WTAP\nTarget Status",
+                    position="bottom") +
+annotate("text",x=0.4,y=0.25,label="italic(p)==7.96~x~10^-6",size=3.5,parse=TRUE)
+
+print(nucgg)
+```
+It appears that WTAP targets are significantly downregulated relative to non targets in the nuclear fraction.
+
+
+Here we compare the cumulative frequencies for log2 siYTHDC1/Control cytoplasm fpkms of WTAP targets and non-targets.
+We normalise to the controls by each gene fpkm by its relative control, take the mean of the two replicates and then Log2 the results.
+
+```{R}
+testmatrix3 <- ythdc1_fpkm_matrix
+testmatrix3$log2ythdc1oversiCcyt <- log2(((testmatrix3$siYTHDC1.Cytoplasm/testmatrix3$siControl.Cytoplasm.re)+(testmatrix3$siYT521.Cytoplasm/testmatrix3$siControl.Cytoplasm))/2)
+testmatrix3clean <- testmatrix3[-which(testmatrix3$log2ythdc1oversiCcyt %in% c("NaN","Inf","-Inf")),]
+```
+
+Now we sort the genes into targets of WTAP and non targets
+
+```{R}
+testmatrix3clean$WTAPtargetstatus <- rep("Non-Target",length(testmatrix3clean$ENSEMBL))
+testmatrix3clean$WTAPtargetstatus[which(testmatrix3clean$ENSEMBL %in% WTAPtargetgenes)] <- "Target"
+```
+
+Here we use a Mann-Whitney U test to determine whether there is a signifant difference between the cytoplasmic fpkms for the targets and non-targets. The result is significant.
+```{R}
+cytoplasmicwilcoxtest <- wilcox.test(log2ythdc1oversiCcyt ~ WTAPtargetstatus, data = testmatrix3clean)
+wilcox.test(log2ythdc1oversiCcyt ~ WTAPtargetstatus, data = testmatrix3clean)
+```
+Here we make a cumulative frequency plot for the log2 cytoplasmic fpkms with different traces for WTAP-targets and non-targets
+
+```{R, fig.width=3, fig.height=3, units="in"}
+cytogg <- ggplot(testmatrix3clean, aes(log2ythdc1oversiCcyt)) + stat_ecdf(geom = "step") + aes(colour=factor(testmatrix3clean$WTAPtargetstatus)) +  
+coord_cartesian(xlim = c(-1,1),
+                ylim = c(0,1)) +
+labs(x=expression(paste("Log" ["2"],"(siYTHDC1/siControl)")),
+y="Cumulative Fraction") + 
+theme_bw(base_size=10) + 
+ggtitle("Cytoplasmic") +
+theme(panel.background = element_blank(), 
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      aspect.ratio = 1,
+      legend.position = "bottom",
+      plot.title = element_text(size = 10,colour="black",margin = margin(t=20,b=-20),hjust = 0.1),
+      panel.border = element_rect(colour = "black", fill=NA, size=1.5)) + 
+scale_colour_manual(values=cbbPalette[c(6,2)],
+                    name="     WTAP\nTarget Status",
+                    position="bottom") +
+annotate("text",x=0.4,y=0.25,label="italic(p)==5.58~x~10^-5",size=3.5,parse=TRUE)
+print(cytogg)
+```
+
+It appears that WTAP targets are significantly downregulated relative to non targets in the cytoplasmic fraction.
+
+
